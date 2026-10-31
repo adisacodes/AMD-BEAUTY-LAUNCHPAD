@@ -1,18 +1,43 @@
 # LaunchPad × AMD Beauty
 
-Product-launch app with three separate experiences:
+A mobile-first web app for the AMD Beauty Peptide Lip Tint launch night. Guests browse the new shades and vote in a live poll. Ushers check guests in at the door. Organizers manage guests, staff and the poll from one dashboard.
 
-| Who | URL | Access |
+Built with React and Vite on the front end and a small Node server that uses only built-in modules (`node:http`, `node:sqlite`, `node:crypto`).
+
+## Three experiences
+
+| Who | Flow | Access |
 | --- | --- | --- |
 | Attendee | `/` → `/showcase` → `/poll` → `/results` | Public, no login |
 | Usher | `/staff/login` → `/usher` | Usher account |
 | Admin | `/admin/login` → `/admin` | Admin account |
 
-Staff pages are not linked from the public site. The API enforces roles on every request.
+Staff pages are not linked from the public site, and the API checks the user's role on every request.
 
-## Run locally
+### Attendee
 
-Requires Node 22.13 or newer (uses the built-in `node:sqlite`).
+- **Landing:** the pink-splash launch screen with a **Get started** button.
+- **Products:** a swipeable carousel of the four shades on phones, or a grid on desktop. Each shade has its own detail view.
+- **Live poll:** three questions with a progress bar, a review step and one submission per device. Answers in progress survive a page refresh.
+- **Waiting screen:** shown while the poll is closed. It has a practice question that is not counted, and it switches to the poll as soon as the organizer opens it.
+- **Thank you and results:** results update live once the organizer makes them visible.
+- **Display settings:** light and dark themes, larger text and a high-contrast mode.
+
+### Usher
+
+- Search guests by name or organization, or enter a guest's code.
+- Check a guest in with one tap. Duplicate check-ins are caught.
+- The guest list updates live across every usher's device.
+
+### Admin
+
+- **Overview:** attendance (checked in and expected), poll open and closed, results shown or hidden, live results and a poll-vote reset.
+- **Guests:** add, edit and remove guests, and generate new entry codes.
+- **Ushers:** create accounts, deactivate them (this signs them out immediately) and reset passwords.
+
+## Getting started
+
+Requires **Node 22.13 or newer**, for the built-in `node:sqlite`.
 
 ```bash
 npm ci
@@ -20,24 +45,88 @@ npm run server   # API on http://localhost:3001 (creates server/data/ on first r
 npm run dev      # app on http://localhost:5173 (proxies /api to the server)
 ```
 
-On first run the server creates two accounts, `amd.admin` and `amd.usher01`, with random temporary passwords. These are written to `server/data/dev-credentials.txt`, which is gitignored and readable only by your user. Each account must set a new password at first sign-in. Delete that file once both passwords are changed.
+Run the two commands in separate terminals, then open http://localhost:5173.
 
-## Production-style run
+### First sign-in
+
+On first run the server creates two staff accounts with random temporary passwords:
+
+| Username | Role | Sign in at |
+| --- | --- | --- |
+| `amd.admin` | Admin | `/admin/login` |
+| `amd.usher01` | Usher | `/staff/login` |
+
+The passwords are written to `server/data/dev-credentials.txt`. That file is gitignored and readable only by your user, and passwords are never printed to the console. Each account must choose a new password at first sign-in. Passwords need at least 10 characters and must not contain the username. Delete the credentials file once both passwords are changed.
+
+Eight sample guests (codes `AMD-1001` to `AMD-1008`) are added so check-in can be tried straight away.
+
+## Scripts
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Vite dev server with hot reload |
+| `npm run server` | API server on port 3001 |
+| `npm run seed` | Creates staff accounts and sample guests on an empty database |
+| `npm run build` | Production build into `dist/` |
+| `npm start` | Serves `dist/` and the API from one process (production mode) |
+| `npm test` | API tests against a throwaway database |
+| `npm run lint` | ESLint |
+
+## Production
 
 ```bash
 npm run build
-npm start        # serves dist/ and the API from one process on port 3001
+npm start        # port 3001 by default
 ```
 
-`npm start` marks cookies `Secure`, so it must be served over HTTPS (behind a reverse proxy).
+`npm start` marks session cookies as `Secure`, so the app must be served over HTTPS, for example behind a reverse proxy.
 
-## Tests
+### Environment variables
 
-```bash
-npm test         # API tests against a throwaway database
-npm run lint
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3001` | Port the server listens on |
+| `NODE_ENV` | (unset) | Set to `production` by `npm start` |
+| `DATA_DIR` | `server/data` | Folder for the database and dev credentials file |
+| `DB_FILE` | `$DATA_DIR/launchpad.db` | SQLite database path |
+| `PUBLIC_ORIGIN` | (unset) | Allowed origin when a reverse proxy rewrites the `Host` header |
+
+## Security
+
+- Passwords are hashed with scrypt. Sessions use random tokens stored as SHA-256 hashes, in `HttpOnly` cookies that last 8 hours.
+- Roles are checked on the server for every request. Admin and usher accounts can only sign in through their own portal.
+- Deactivating an usher or resetting a password takes effect on that user's next request.
+- Sign-in is rate limited: 5 failures per username and IP address, or 20 per IP address, within 15 minutes.
+- Requests that change data must come from the same origin, so cross-site requests are rejected.
+
+## Project structure
+
+```
+server/
+  index.js        HTTP server, API routes, live events (SSE), static files in production
+  auth.js         password hashing, sessions, rate limiting
+  db.js           SQLite schema and settings
+  seed.js         first staff accounts and sample guests
+  test/           API tests (node --test)
+src/
+  App.jsx         routing and role guards
+  App.css         design tokens, light and dark themes, glass components
+  styles/         attendee extras: text size, high contrast, waiting screen
+  pages/          Landing, Showcase, Poll, Waiting, Results, Usher, Admin, Login, ...
+  components/     Header, TopBar, AccessibilityBar, ResultsList, Icons, ...
+  hooks/          useRoute, useAuth, useApiData, useLive, useTheme, useA11y
+  api/client.js   fetch wrapper for /api
+  data/           poll questions and product details
+public/images/    product artwork
 ```
 
 ## Data
 
-SQLite database at `server/data/launchpad.db`: staff accounts (scrypt-hashed passwords), sessions, guests, check-ins, poll settings and votes. Live updates use Server-Sent Events (`/api/events`).
+The SQLite database lives at `server/data/launchpad.db` and is gitignored. It stores staff accounts, sessions, guests, check-ins, poll settings and votes. Live updates reach the browser through Server-Sent Events at `/api/events`.
+
+To change the poll questions, edit [src/data/polls.js](src/data/polls.js). Both the app and the server read it. Votes are stored by option label.
+
+## Credits
+
+- **Frontend development:** Marie ([@adisacodes](https://github.com/adisacodes))
+- **UI/UX design:** Derrick Ayieko
