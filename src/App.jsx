@@ -1,122 +1,83 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useState, useEffect } from "react";
+import { guests } from "./data/guests";
+import { polls } from "./data/polls";
+import { loadData, saveData } from "./utils/storage";
+import Header from "./components/Header";
+import UsherPage from "./pages/UsherPage";
+import PollPage from "./pages/PollPage";
+import OrganizerPage from "./pages/OrganizerPage";
 
-function App() {
-  const [count, setCount] = useState(0)
+const KEYS = {
+  checkedIn: "amd_checkedIn",
+  votes: "amd_votes",
+  answered: "amd_answered",
+};
+
+export default function App() {
+  const [tab, setTab] = useState("usher");
+  const [checkedIn, setCheckedIn] = useState(() => loadData(KEYS.checkedIn, {}));
+  const [votes, setVotes] = useState(() => loadData(KEYS.votes, {}));
+  const [answered, setAnswered] = useState(() => loadData(KEYS.answered, {}));
+
+  // Save to localStorage whenever something changes.
+  useEffect(() => { saveData(KEYS.checkedIn, checkedIn); }, [checkedIn]);
+  useEffect(() => { saveData(KEYS.votes, votes); }, [votes]);
+  useEffect(() => { saveData(KEYS.answered, answered); }, [answered]);
+
+  // Keep two open tabs in sync (handy for the demo: organizer in one tab).
+  useEffect(() => {
+    function onStorage(e) {
+      if (e.key === KEYS.checkedIn) setCheckedIn(loadData(KEYS.checkedIn, {}));
+      if (e.key === KEYS.votes) setVotes(loadData(KEYS.votes, {}));
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  function checkIn(id) {
+    setCheckedIn((prev) => (prev[id] ? prev : { ...prev, [id]: new Date().toISOString() }));
+  }
+
+  // One function for code check-in, so a QR scanner could call it later.
+  function checkInByCode(code) {
+    const clean = code.trim().toUpperCase();
+    if (!clean) return { status: "empty" };
+    const guest = guests.find((g) => g.code?.trim().toUpperCase() === clean);
+    if (!guest) return { status: "not_found" };
+    if (checkedIn[guest.id]) return { status: "already", guest, time: checkedIn[guest.id] };
+    checkIn(guest.id);
+    return { status: "ok", guest };
+  }
+
+  function vote(questionId, option) {
+    if (answered[questionId]) return;
+    setVotes((prev) => ({
+      ...prev,
+      [questionId]: {
+        ...prev[questionId],
+        [option]: (prev[questionId]?.[option] || 0) + 1,
+      },
+    }));
+    setAnswered((prev) => ({ ...prev, [questionId]: option }));
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+    <div className="app">
+      <Header tab={tab} onTabChange={setTab} />
+      {tab === "usher" && (
+        <UsherPage
+          guests={guests}
+          checkedIn={checkedIn}
+          onCheckIn={checkIn}
+          onCheckInByCode={checkInByCode}
+        />
+      )}
+      {tab === "poll" && (
+        <PollPage polls={polls} answered={answered} onVote={vote} onReset={() => setAnswered({})} />
+      )}
+      {tab === "organizer" && (
+        <OrganizerPage guests={guests} checkedIn={checkedIn} polls={polls} votes={votes} />
+      )}
+    </div>
+  );
 }
-
-export default App
