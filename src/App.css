@@ -340,6 +340,29 @@ a { color: var(--accent); }
   font-size: 0.75rem; font-weight: 600;
 }
 .tag.off { background: var(--error-bg); color: var(--error); }
+.tag.ok { background: var(--success-bg); color: var(--success); }
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.revoked { background: var(--error-bg); color: var(--error); }
+
+/* ---------- Invitations ---------- */
+a.link-btn { display: inline-flex; align-items: center; text-decoration: none; }
+.more-menu { flex-direction: column; align-items: flex-start; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--glass-border); }
+.new-invite { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--glass-border); }
+.summary { cursor: pointer; list-style-position: inside; margin: 0; min-height: 28px; }
+details[open] > .summary { margin-bottom: 8px; }
+
+.invite-card { border-radius: var(--radius); padding: 28px 22px; display: grid; gap: 14px; text-align: center; justify-items: center; }
+.invite-name { font-size: 2.4rem; line-height: 1.1; }
+.invite-details { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; text-align: left; }
+.invite-details dt { color: var(--accent); font-weight: 600; font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase; padding-top: 2px; }
+.invite-details dd { margin: 0; }
+.invite-pass { width: 100%; display: grid; gap: 4px; justify-items: center; padding: 18px; border-radius: 18px; background: var(--glass-strong); border: 1px solid var(--glass-border); }
+.invite-qr { width: 180px; height: 180px; border-radius: 12px; background: #fff; margin-bottom: 6px; }
+.invite-code { font-family: var(--serif); font-size: 1.9rem; letter-spacing: 0.08em; color: var(--accent); }
+
+.scanner { border-radius: var(--radius); padding: 12px; margin: 10px 0; display: grid; gap: 10px; }
+.scanner-video { width: 100%; border-radius: 14px; background: #000; aspect-ratio: 1; object-fit: cover; }
+.code-form + .btn { margin-bottom: 8px; }
 .card .card-info { flex: 1; }
 .card .btn svg { width: 16px; height: 16px; }
 

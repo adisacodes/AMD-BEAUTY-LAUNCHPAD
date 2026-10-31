@@ -61,8 +61,23 @@ db.exec(`
     PRIMARY KEY (attendee_id, question_id)
   );
 
+  -- One current invitation link per guest. The token is looked up by hash; the encrypted
+  -- copy lets an admin copy the same link again. Regenerating replaces both.
+  CREATE TABLE IF NOT EXISTS invitations (
+    guest_id INTEGER PRIMARY KEY REFERENCES guests(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_enc TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    revoked_at TEXT
+  );
+
   INSERT OR IGNORE INTO settings (key, value) VALUES ('poll_open', '1'), ('results_visible', '1');
 `);
+
+// Columns added after the first release.
+if (!db.prepare("SELECT 1 FROM pragma_table_info('guests') WHERE name = 'phone'").get()) {
+  db.exec("ALTER TABLE guests ADD COLUMN phone TEXT NOT NULL DEFAULT ''");
+}
 
 export function transaction(fn) {
   db.exec("BEGIN IMMEDIATE");
@@ -84,4 +99,19 @@ export function getSettings() {
 
 export function setSetting(key, on) {
   db.prepare("UPDATE settings SET value = ? WHERE key = ?").run(on ? "1" : "0", key);
+}
+
+// Optional event details set by the admin. Blank means "not configured": never invented.
+const EVENT_KEYS = { when: "event_when", venue: "event_venue", expiresAt: "invite_expires_at" };
+
+export function getEvent() {
+  const get = (k) => db.prepare("SELECT value FROM settings WHERE key = ?").get(k)?.value ?? "";
+  return { when: get(EVENT_KEYS.when), venue: get(EVENT_KEYS.venue), expiresAt: get(EVENT_KEYS.expiresAt) || null };
+}
+
+export function setEvent({ when, venue, expiresAt }) {
+  const put = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  put.run(EVENT_KEYS.when, when);
+  put.run(EVENT_KEYS.venue, venue);
+  put.run(EVENT_KEYS.expiresAt, expiresAt ?? "");
 }

@@ -49,7 +49,8 @@ export default function UsherPage({ data, error, loading, reload }) {
 
   async function checkInGuest(id) {
     const res = await checkIn({ guestId: id });
-    if (res.status === "ok") setNotice({ type: "ok", text: `Welcome, ${displayName(res.guest)}!` });
+    if (res.status === "ok") setNotice({ type: "ok", text: `Invitation confirmed. Welcome, ${displayName(res.guest)}!` });
+    else if (res.status === "revoked") setNotice({ type: "error", text: `${displayName(res.guest)}'s invitation was revoked. Please ask the organizer.` });
     else if (res.status === "already") setNotice({ type: "already", text: `${displayName(res.guest)} already checked in at ${formatTime(res.time)}` });
     else setNotice({ type: "error", text: res.message ?? "Guest not found" });
   }

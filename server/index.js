@@ -4,7 +4,8 @@ import { randomBytes, randomInt } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { db, transaction, getSettings, setSetting } from "./db.js";
+import { db, transaction, getSettings, setSetting, getEvent, setEvent } from "./db.js";
+import { issueInvitation, revokeInvitation, backfillInvitations, invitationFor, findInvitation } from "./invites.js";
 import {
   SESSION_COOKIE, hashPassword, verifyPassword, generateTempPassword, passwordProblem,
   createSession, userFromToken, destroySession, destroyUserSessions,
@@ -88,8 +89,24 @@ function requireUser(ctx, ...roles) {
 }
 
 // ---------- data mapping ----------
-const GUEST_SQL = `SELECT g.id, g.name, g.organization, g.ticket_type AS ticketType, g.code, c.checked_in_at AS checkedInAt
-  FROM guests g LEFT JOIN checkins c ON c.guest_id = g.id`;
+// `invitation` is none / active / revoked. Link expiry only limits opening the link, not entry at the door.
+const GUEST_SQL = `SELECT g.id, g.name, g.organization, g.ticket_type AS ticketType, g.code, c.checked_in_at AS checkedInAt,
+    CASE WHEN i.guest_id IS NULL THEN 'none' WHEN i.revoked_at IS NOT NULL THEN 'revoked' ELSE 'active' END AS invitation
+  FROM guests g LEFT JOIN checkins c ON c.guest_id = g.id LEFT JOIN invitations i ON i.guest_id = g.id`;
+
+// Where invitation links point: PUBLIC_ORIGIN in production, otherwise the host the admin is using.
+function baseUrl(req) {
+  if (process.env.PUBLIC_ORIGIN) return process.env.PUBLIC_ORIGIN.replace(/\/+$/, "");
+  return `${PROD ? "https" : "http"}://${req.headers.host}`;
+}
+
+// Admin-only guest view: adds phone and the invitation link.
+function adminGuest(id, req, event = getEvent()) {
+  const g = db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(id);
+  if (!g) return null;
+  const { phone } = db.prepare("SELECT phone FROM guests WHERE id = ?").get(id);
+  return { ...g, phone, invitation: invitationFor(id, baseUrl(req), event) };
+}
 
 function generateCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -104,7 +121,18 @@ function generateCode() {
 function guestInput(body) {
   const name = str(body.name);
   if (!name) throw new HttpError(400, "Guest name is required.");
-  return { name, organization: str(body.organization), ticketType: str(body.ticketType, 40) };
+  // WhatsApp number in international format, digits only (e.g. 254712345678). Optional.
+  const phone = str(body.phone, 32).replace(/[\s().-]/g, "").replace(/^\+/, "");
+  if (phone && !/^[1-9]\d{7,14}$/.test(phone)) {
+    throw new HttpError(400, "Phone: use the international format with country code, e.g. +254 712 345678.");
+  }
+  return { name, organization: str(body.organization), ticketType: str(body.ticketType, 40), phone };
+}
+
+function eventInput(body) {
+  const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null;
+  if (expiresAt && Number.isNaN(expiresAt.getTime())) throw new HttpError(400, "Invalid expiry date.");
+  return { when: str(body.when, 120), venue: str(body.venue, 160), expiresAt: expiresAt?.toISOString() ?? null };
 }
 
 function results() {
@@ -125,7 +153,8 @@ function attendance() {
 const routes = [];
 const route = (method, pattern, handler) => {
   const keys = [];
-  const re = new RegExp(`^${pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), "(\\d+)"))}$`);
+  // :token matches an invitation token; every other parameter is a numeric id.
+  const re = new RegExp(`^${pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), k === "token" ? "([A-Za-z0-9_-]{1,100})" : "(\\d+)"))}$`);
   routes.push({ method, re, keys, handler });
 };
 
@@ -188,6 +217,8 @@ route("POST", "/api/checkin", async (ctx) => {
     ? db.prepare(`${GUEST_SQL} WHERE g.code = ?`).get(str(body.code, 40).toUpperCase())
     : db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(Number(body.guestId) || 0);
   if (!guest) return { status: "not_found" };
+  // A revoked invitation means the guest was uninvited; the door must not let them in.
+  if (guest.invitation === "revoked") return { status: "revoked", guest };
   const now = new Date().toISOString();
   // The primary key on guest_id makes this atomic: a second device gets "already".
   const { changes } = db
@@ -201,26 +232,38 @@ route("POST", "/api/checkin", async (ctx) => {
   return { status: "ok", guest: { ...guest, checkedInAt: now } };
 });
 
-// Admin: guests
+// Admin: guests (with phone numbers and invitation links, which ushers never see)
+route("GET", "/api/admin/guests", (ctx) => {
+  requireUser(ctx, "admin");
+  const event = getEvent();
+  const ids = db.prepare("SELECT id FROM guests ORDER BY name COLLATE NOCASE").all();
+  return { guests: ids.map(({ id }) => adminGuest(id, ctx.req, event)), event, ...attendance() };
+});
+
 route("POST", "/api/admin/guests", async (ctx) => {
   requireUser(ctx, "admin");
   const g = guestInput(await readJson(ctx.req));
-  const { lastInsertRowid } = db
-    .prepare("INSERT INTO guests (name, organization, ticket_type, code) VALUES (?, ?, ?, ?)")
-    .run(g.name, g.organization, g.ticketType, generateCode());
+  // Every new guest gets an invitation link straight away.
+  const id = transaction(() => {
+    const { lastInsertRowid } = db
+      .prepare("INSERT INTO guests (name, organization, ticket_type, code, phone) VALUES (?, ?, ?, ?, ?)")
+      .run(g.name, g.organization, g.ticketType, generateCode(), g.phone);
+    issueInvitation(lastInsertRowid);
+    return lastInsertRowid;
+  });
   broadcast("guests");
-  return { guest: db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(lastInsertRowid) };
+  return { guest: adminGuest(id, ctx.req) };
 });
 
 route("PUT", "/api/admin/guests/:id", async (ctx) => {
   requireUser(ctx, "admin");
   const g = guestInput(await readJson(ctx.req));
   const { changes } = db
-    .prepare("UPDATE guests SET name = ?, organization = ?, ticket_type = ? WHERE id = ?")
-    .run(g.name, g.organization, g.ticketType, ctx.params.id);
+    .prepare("UPDATE guests SET name = ?, organization = ?, ticket_type = ?, phone = ? WHERE id = ?")
+    .run(g.name, g.organization, g.ticketType, g.phone, ctx.params.id);
   if (!changes) throw new HttpError(404, "Guest not found.");
   broadcast("guests");
-  return { guest: db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(ctx.params.id) };
+  return { guest: adminGuest(ctx.params.id, ctx.req) };
 });
 
 route("POST", "/api/admin/guests/:id/code", (ctx) => {
@@ -228,7 +271,32 @@ route("POST", "/api/admin/guests/:id/code", (ctx) => {
   const { changes } = db.prepare("UPDATE guests SET code = ? WHERE id = ?").run(generateCode(), ctx.params.id);
   if (!changes) throw new HttpError(404, "Guest not found.");
   broadcast("guests");
-  return { guest: db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(ctx.params.id) };
+  return { guest: adminGuest(ctx.params.id, ctx.req) };
+});
+
+// Create a new link (also restores a revoked invitation). The previous link stops working.
+route("POST", "/api/admin/guests/:id/invitation", (ctx) => {
+  requireUser(ctx, "admin");
+  if (!db.prepare("SELECT 1 FROM guests WHERE id = ?").get(ctx.params.id)) throw new HttpError(404, "Guest not found.");
+  issueInvitation(ctx.params.id);
+  broadcast("guests");
+  return { guest: adminGuest(ctx.params.id, ctx.req) };
+});
+
+route("DELETE", "/api/admin/guests/:id/invitation", (ctx) => {
+  requireUser(ctx, "admin");
+  if (!db.prepare("SELECT 1 FROM guests WHERE id = ?").get(ctx.params.id)) throw new HttpError(404, "Guest not found.");
+  revokeInvitation(ctx.params.id);
+  broadcast("guests");
+  return { guest: adminGuest(ctx.params.id, ctx.req) };
+});
+
+// Admin: optional event details used in invitations (blank = not shown anywhere).
+route("PUT", "/api/admin/event", async (ctx) => {
+  requireUser(ctx, "admin");
+  setEvent(eventInput(await readJson(ctx.req)));
+  broadcast("guests");
+  return { event: getEvent() };
 });
 
 route("DELETE", "/api/admin/guests/:id", (ctx) => {
@@ -314,6 +382,18 @@ route("POST", "/api/admin/poll/reset", (ctx) => {
 route("GET", "/api/admin/overview", (ctx) => {
   requireUser(ctx, "admin");
   return { ...attendance(), ...results(), settings: getSettings() };
+});
+
+// Public: open an invitation link. Read-only: it never checks the guest in.
+// Only what the invitation card needs is returned (no organization, phone or ids).
+route("GET", "/api/invite/:token", (ctx) => {
+  const found = findInvitation(ctx.params.token);
+  if (!found) throw new HttpError(404, "This invitation link is not valid.");
+  if (found.status === "revoked") throw new HttpError(410, "This invitation has been cancelled.");
+  if (found.status === "expired") throw new HttpError(410, "This invitation has expired.");
+  const guest = db.prepare("SELECT name, code FROM guests WHERE id = ?").get(found.row.guest_id);
+  const { when, venue } = getEvent();
+  return { guest: { name: guest.name }, code: guest.code, event: { when, venue } };
 });
 
 // Public: attendee poll. Attendees are anonymous; an HttpOnly cookie identifies the browser.
@@ -417,7 +497,7 @@ export const server = createServer(async (req, res) => {
   for (const r of routes) {
     const m = r.method === req.method && url.pathname.match(r.re);
     if (!m) continue;
-    r.keys.forEach((k, i) => (ctx.params[k] = Number(m[i + 1])));
+    r.keys.forEach((k, i) => (ctx.params[k] = k === "token" ? m[i + 1] : Number(m[i + 1])));
     try {
       const body = await r.handler(ctx);
       return send(res, 200, body, setCookies.length ? { "Set-Cookie": setCookies } : {});
@@ -432,4 +512,6 @@ export const server = createServer(async (req, res) => {
 });
 
 if (seed()) console.log(`Created staff accounts. Temporary passwords are in ${CREDENTIALS_FILE}`);
+const backfilled = backfillInvitations();
+if (backfilled) console.log(`Created invitation links for ${backfilled} existing guests.`);
 server.listen(PORT, () => console.log(`LaunchPad API listening on http://localhost:${PORT}`));

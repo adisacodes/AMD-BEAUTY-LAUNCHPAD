@@ -10,6 +10,7 @@ import useApiData from "./hooks/useApiData";
 import useLive from "./hooks/useLive";
 import Header from "./components/Header";
 import LandingPage from "./pages/LandingPage";
+import InvitePage from "./pages/InvitePage";
 import ShowcasePage from "./pages/ShowcasePage";
 import PollPage from "./pages/PollPage";
 import ResultsPage from "./pages/ResultsPage";
@@ -70,6 +71,9 @@ export default function App() {
 
   // ---- Attendee (public) ----
   if (route === "") return <LandingPage onStart={() => navigate("showcase")} />;
+  if (route.startsWith("invite/")) {
+    return <InvitePage token={route.slice("invite/".length)} onNavigate={navigate} {...attendeeProps} />;
+  }
   if (route === "showcase") return <ShowcasePage onNavigate={navigate} {...attendeeProps} />;
   if (route === "poll") return <PollPage polls={polls} onNavigate={navigate} {...attendeeProps} />;
   if (route === "results") return <ResultsPage polls={polls} onNavigate={navigate} {...attendeeProps} />;

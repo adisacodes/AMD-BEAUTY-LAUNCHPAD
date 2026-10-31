@@ -21,7 +21,7 @@ export default function AdminPage({ user, onLogout, theme, onToggleTheme }) {
   const [actionError, setActionError] = useState("");
   const live = useLive(["poll", "checkins", "guests"]);
   const overview = useApiData("/admin/overview", live.tick);
-  const guests = useApiData("/guests", live.tick);
+  const guests = useApiData("/admin/guests", live.tick);
 
   async function act(fn) {
     setBusy(true);
@@ -41,7 +41,7 @@ export default function AdminPage({ user, onLogout, theme, onToggleTheme }) {
     body = <AdminUshers />;
   } else if (section === "guests") {
     body = guests.data
-      ? <AdminGuests guests={guests.data.guests} reload={guests.reload} />
+      ? <AdminGuests guests={guests.data.guests} event={guests.data.event} reload={guests.reload} />
       : <div className="page"><p className="empty" role="status">{guests.error?.message ?? "Loading…"}</p></div>;
   } else {
     body = overview.data ? (

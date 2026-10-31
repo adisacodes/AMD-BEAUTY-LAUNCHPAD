@@ -16,9 +16,12 @@ export default function GuestCard({ guest, checkedAt, onCheckIn }) {
         <span>
           <span className="tag">{displayTicket(guest)}</span> {guest.code ?? "No code"}
         </span>
+        {guest.invitation === "revoked" && <span className="tag off">Invitation revoked</span>}
       </div>
       {checkedAt ? (
         <span className="badge">✓ Checked in {formatTime(checkedAt)}</span>
+      ) : guest.invitation === "revoked" ? (
+        <span className="badge revoked">Ask organizer</span>
       ) : (
         <button className="btn primary" onClick={() => onCheckIn(guest.id)}>
           Check in<span className="sr-only"> {displayName(guest)}</span> <ArrowRight />

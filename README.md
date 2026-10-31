@@ -89,7 +89,8 @@ npm start        # port 3001 by default
 | `NODE_ENV` | (unset) | Set to `production` by `npm start` |
 | `DATA_DIR` | `server/data` | Folder for the database and dev credentials file |
 | `DB_FILE` | `$DATA_DIR/launchpad.db` | SQLite database path |
-| `PUBLIC_ORIGIN` | (unset) | Allowed origin when a reverse proxy rewrites the `Host` header |
+| `PUBLIC_ORIGIN` | (unset) | Public address of the app, e.g. `https://launchpad.example.com`. Used as the base of guest invitation links, and as an allowed origin when a reverse proxy rewrites the `Host` header. **Set this before sending invitations.** Without it, links use whatever address the admin opened the dashboard on. |
+| `INVITE_KEY` | (unset) | 32 random bytes, base64-encoded, used to encrypt stored invitation links. If unset, a key is created at `$DATA_DIR/invite.key`. |
 
 ## Security
 

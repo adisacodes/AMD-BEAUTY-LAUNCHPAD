@@ -114,6 +114,92 @@ test("admin adds and edits a guest with a generated code; usher checks in once",
   assert.equal((await usher("GET", "/api/guests")).body.checkedIn, 0);
 });
 
+test("invitation links: unique, read-only, regenerate, revoke, expiry and admin-only", async () => {
+  const tokenOf = (url) => url.split("/invite/")[1];
+  const a1 = (await admin("POST", "/api/admin/guests", { name: "Amina Invite", organization: "Secret Org", phone: "+254 712 345678" })).body.guest;
+  const a2 = (await admin("POST", "/api/admin/guests", { name: "Brian Invite" })).body.guest;
+  assert.equal(a1.invitation.status, "active");
+  assert.match(a1.invitation.url, /^http:\/\/localhost:3999\/invite\/[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(a1.invitation.url, a2.invitation.url);
+  assert.equal(a1.phone, "254712345678");
+  assert.equal((await admin("POST", "/api/admin/guests", { name: "Bad Phone", phone: "12ab" })).status, 400);
+  // Seeded guests got links on startup; links are stable across reads.
+  const list1 = (await admin("GET", "/api/admin/guests")).body.guests;
+  assert.ok(list1.every((g) => g.invitation.status === "active" && g.invitation.url));
+  const list2 = (await admin("GET", "/api/admin/guests")).body.guests;
+  assert.deepEqual(list1.map((g) => g.invitation.url), list2.map((g) => g.invitation.url));
+
+  // Opening the link: only name, code and configured event details. Never checks in.
+  const anon = client();
+  const open = await anon("GET", `/api/invite/${tokenOf(a1.invitation.url)}`);
+  assert.equal(open.status, 200);
+  assert.deepEqual(open.body, { guest: { name: "Amina Invite" }, code: a1.code, event: { when: "", venue: "" } });
+  const afterOpen = (await usher("GET", "/api/guests")).body.guests.find((g) => g.id === a1.id);
+  assert.equal(afterOpen.checkedInAt, null);
+  assert.equal(afterOpen.url, undefined);
+  assert.equal(afterOpen.phone, undefined);
+  assert.equal((await anon("GET", "/api/invite/not-a-real-token")).status, 404);
+  assert.equal((await anon("GET", `/api/invite/${"x".repeat(43)}`)).status, 404);
+
+  // Ushers cannot see or manage invitations.
+  assert.equal((await usher("GET", "/api/admin/guests")).status, 403);
+  assert.equal((await usher("POST", `/api/admin/guests/${a1.id}/invitation`)).status, 403);
+  assert.equal((await usher("DELETE", `/api/admin/guests/${a1.id}/invitation`)).status, 403);
+  assert.equal((await usher("PUT", "/api/admin/event", { when: "x" })).status, 403);
+  assert.equal((await anon("GET", "/api/admin/guests")).status, 401);
+
+  // Regenerating invalidates the previous link.
+  const regen = (await admin("POST", `/api/admin/guests/${a1.id}/invitation`)).body.guest;
+  assert.notEqual(regen.invitation.url, a1.invitation.url);
+  assert.equal((await anon("GET", `/api/invite/${tokenOf(a1.invitation.url)}`)).status, 404);
+  assert.equal((await anon("GET", `/api/invite/${tokenOf(regen.invitation.url)}`)).status, 200);
+
+  // Revoking: link gone, door refuses; restoring issues a fresh link.
+  const revoked = (await admin("DELETE", `/api/admin/guests/${a1.id}/invitation`)).body.guest;
+  assert.equal(revoked.invitation.status, "revoked");
+  assert.equal(revoked.invitation.url, null);
+  assert.equal((await anon("GET", `/api/invite/${tokenOf(regen.invitation.url)}`)).status, 410);
+  assert.equal((await usher("POST", "/api/checkin", { code: a1.code })).body.status, "revoked");
+  assert.equal((await usher("GET", "/api/guests")).body.guests.find((g) => g.id === a1.id).invitation, "revoked");
+  const restored = (await admin("POST", `/api/admin/guests/${a1.id}/invitation`)).body.guest;
+  assert.equal(restored.invitation.status, "active");
+  assert.equal((await anon("GET", `/api/invite/${tokenOf(regen.invitation.url)}`)).status, 404);
+
+  // Event details appear only once configured; expiry closes links but not the door.
+  await admin("PUT", "/api/admin/event", { when: "Sat 15 Nov, 6 PM", venue: "Glow Hall" });
+  assert.deepEqual((await anon("GET", `/api/invite/${tokenOf(restored.invitation.url)}`)).body.event, { when: "Sat 15 Nov, 6 PM", venue: "Glow Hall" });
+  await admin("PUT", "/api/admin/event", { when: "Sat 15 Nov, 6 PM", venue: "Glow Hall", expiresAt: "2020-01-01T00:00:00Z" });
+  const expired = await anon("GET", `/api/invite/${tokenOf(restored.invitation.url)}`);
+  assert.equal(expired.status, 410);
+  assert.equal(expired.body.error, "This invitation has expired.");
+  assert.equal((await admin("GET", "/api/admin/guests")).body.guests.find((g) => g.id === a1.id).invitation.status, "expired");
+  assert.equal((await usher("POST", "/api/checkin", { code: a1.code })).body.status, "ok");
+  await admin("PUT", "/api/admin/event", { when: "", venue: "", expiresAt: null });
+  assert.equal((await anon("GET", `/api/invite/${tokenOf(restored.invitation.url)}`)).status, 200);
+
+  // Deleting a guest removes their invitation.
+  await admin("DELETE", `/api/admin/guests/${a2.id}`);
+  assert.equal((await anon("GET", `/api/invite/${tokenOf(a2.invitation.url)}`)).status, 404);
+  await admin("DELETE", `/api/admin/guests/${a1.id}`);
+});
+
+test("WhatsApp link carries the personalised, encoded message and is never auto-sent", async () => {
+  const { invitationMessage, whatsappUrl } = await import("../../src/utils/invite.js");
+  const url = "http://localhost:3999/invite/abc_DEF-123";
+  const msg = invitationMessage({ name: "Amina Wanjiru" }, url, { when: "", venue: "" });
+  assert.match(msg, /^Hello Amina! 💗/);
+  assert.ok(msg.includes(url));
+  assert.ok(!msg.includes("📅") && !msg.includes("📍")); // No invented date or venue.
+  assert.ok(invitationMessage({ name: "A" }, url, { when: "Sat 6 PM", venue: "Glow Hall" }).includes("📍 Glow Hall"));
+
+  const direct = new URL(whatsappUrl("254712345678", msg));
+  assert.equal(direct.origin + direct.pathname, "https://wa.me/254712345678");
+  assert.equal(direct.searchParams.get("text"), msg);
+  const picker = new URL(whatsappUrl("", msg));
+  assert.equal(picker.pathname, "/");
+  assert.equal(picker.searchParams.get("text"), msg);
+});
+
 test("admin creates, deactivates and resets an usher; deactivation is immediate", async () => {
   const made = await admin("POST", "/api/admin/ushers", { username: "amd.usher02" });
   assert.equal(made.status, 200);

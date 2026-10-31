@@ -2,9 +2,12 @@ import { useState, useEffect, useCallback } from "react";
 
 const ROUTES = new Set(["", "showcase", "poll", "results", "staff/login", "usher", "admin/login", "admin"]);
 
+// Invitation links: /invite/<token>. The token is checked by the server.
+const INVITE = /^invite\/[A-Za-z0-9_-]{1,100}$/;
+
 function readPath() {
   const name = window.location.pathname.replace(/^\/+|\/+$/g, "");
-  return ROUTES.has(name) ? name : "";
+  return ROUTES.has(name) || INVITE.test(name) ? name : "";
 }
 
 // Tiny history router: real URLs (/usher, /admin) without a dependency.
