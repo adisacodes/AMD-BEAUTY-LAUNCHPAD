@@ -46,7 +46,7 @@ const USHER_PW = "Usher-Strong-Pass-2026";
 
 const admin = client();
 const usher = client();
-const answers = { q1: "Latte", q2: "Moisturizing", q3: "Definitely" };
+const answers = { q1: "Toast", q2: "Moisturizing", q3: "Definitely" };
 
 test("unauthenticated visitors cannot use staff APIs", async () => {
   const anon = client();
@@ -228,13 +228,13 @@ test("attendee votes once; validation, visibility and closing are enforced", asy
   const a = client();
   assert.equal((await a("GET", "/api/poll")).body.submitted, false);
   assert.equal((await a("POST", "/api/poll/vote", { answers: { ...answers, q2: "Natural ingredients" } })).status, 400);
-  assert.equal((await a("POST", "/api/poll/vote", { answers: { q1: "Latte" } })).status, 400);
+  assert.equal((await a("POST", "/api/poll/vote", { answers: { q1: "Toast" } })).status, 400);
   assert.equal((await a("POST", "/api/poll/vote", { answers })).status, 200);
   assert.equal((await a("POST", "/api/poll/vote", { answers })).status, 409);
   assert.equal((await a("GET", "/api/poll")).body.submitted, true);
 
   const r = await a("GET", "/api/poll/results");
-  assert.equal(r.body.votes.q1.Latte, 1);
+  assert.equal(r.body.votes.q1.Toast, 1);
   assert.equal(r.body.voters, 1);
 
   await admin("PUT", "/api/admin/settings", { resultsVisible: false });
