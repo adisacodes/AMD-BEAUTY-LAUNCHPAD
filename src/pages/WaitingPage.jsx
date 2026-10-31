@@ -1,44 +1,44 @@
 import { useState } from "react";
 
-const LETTERS = ["A", "B", "C", "D"];
 const PRACTICE = {
   text: "How are you feeling tonight?",
   options: ["Excited", "Curious", "Relaxed"],
 };
 
 // Shown to attendees until the organizer opens the poll.
-export default function WaitingPage() {
+export default function WaitingPage({ onBack }) {
   // The practice answer is never saved or counted.
   const [picked, setPicked] = useState(null);
 
   return (
-    <main className="page waiting">
-      <div className="waiting-card">
+    <div className="waiting">
+      <div className="card-center glass waiting-card">
         <div className="pulse" aria-hidden="true" />
-        <h1>You're in!</h1>
-        <p>
+        <h1 className="serif">You're in!</h1>
+        <p className="muted">
           The poll opens when the launch starts. This page changes by itself, so
           you don't need to refresh.
         </p>
       </div>
 
-      <section className="practice" aria-labelledby="practice-title">
-        <h2 id="practice-title">Warm up while you wait</h2>
-        <p>Try a practice question. It does not count.</p>
+      <section className="practice glass" aria-labelledby="practice-title">
+        <h2 id="practice-title" className="serif">Warm up while you wait</h2>
+        <p className="muted small">Try a practice question. It does not count.</p>
         <fieldset>
           <legend>{PRACTICE.text}</legend>
           <div className="options">
             {PRACTICE.options.map((opt, i) => (
               <button
                 key={opt}
-                className={`option ${picked === opt ? "picked" : ""}`}
+                type="button"
+                className={`option simple glass ${picked === opt ? "selected" : ""}`}
                 aria-pressed={picked === opt}
                 onClick={() => setPicked(opt)}
               >
-                <span className="option-letter" aria-hidden="true">
-                  {picked === opt ? "✓" : LETTERS[i]}
+                <span className="letter" aria-hidden="true">
+                  {picked === opt ? "✓" : String.fromCharCode(65 + i)}
                 </span>
-                {opt}
+                <span className="opt-text"><strong>{opt}</strong></span>
               </button>
             ))}
           </div>
@@ -48,10 +48,16 @@ export default function WaitingPage() {
         </p>
       </section>
 
-      <section className="help" aria-labelledby="help-title">
-        <h2 id="help-title">Need help?</h2>
-        <p>Ask any usher if you need help with access, seating or anything else.</p>
+      <section className="help glass" aria-labelledby="help-title">
+        <h2 id="help-title" className="serif">Need help?</h2>
+        <p className="muted">Ask any usher if you need help with access, seating or anything else.</p>
       </section>
-    </main>
+
+      {onBack && (
+        <button type="button" className="btn ghost block waiting-back" onClick={onBack}>
+          Back to products
+        </button>
+      )}
+    </div>
   );
 }

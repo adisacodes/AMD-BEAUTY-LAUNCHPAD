@@ -6,14 +6,16 @@ export default function AccessibilityBar({ settings, onChange }) {
   return (
     <section className="a11y-bar" aria-label="Display settings">
       <button
-        className="a11y-btn"
+        type="button"
+        className="a11y-btn glass"
         onClick={() => onChange({ size: (settings.size + 1) % SIZE_LABELS.length })}
         aria-label={`Text size: ${SIZE_LABELS[settings.size]}. Press to change.`}
       >
         <span aria-hidden="true">Aa</span> {SIZE_LABELS[settings.size]}
       </button>
       <button
-        className="a11y-btn"
+        type="button"
+        className="a11y-btn glass"
         aria-pressed={settings.contrast}
         onClick={() => onChange({ contrast: !settings.contrast })}
       >

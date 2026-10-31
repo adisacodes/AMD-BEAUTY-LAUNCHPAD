@@ -15,3 +15,11 @@ export function saveData(key, value) {
     // Storage full or blocked: the app keeps working without saving.
   }
 }
+
+export function removeData(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore: nothing to clear if storage is blocked.
+  }
+}

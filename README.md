@@ -1,16 +1,43 @@
-# React + Vite
+# LaunchPad × AMD Beauty
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Product-launch app with three separate experiences:
 
-Currently, two official plugins are available:
+| Who | URL | Access |
+| --- | --- | --- |
+| Attendee | `/` → `/showcase` → `/poll` → `/results` | Public, no login |
+| Usher | `/staff/login` → `/usher` | Usher account |
+| Admin | `/admin/login` → `/admin` | Admin account |
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Staff pages are not linked from the public site. The API enforces roles on every request.
 
-## React Compiler
+## Run locally
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Requires Node 22.13 or newer (uses the built-in `node:sqlite`).
 
-## Expanding the ESLint configuration
+```bash
+npm ci
+npm run server   # API on http://localhost:3001 (creates server/data/ on first run)
+npm run dev      # app on http://localhost:5173 (proxies /api to the server)
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+On first run the server creates two accounts, `amd.admin` and `amd.usher01`, with random temporary passwords. These are written to `server/data/dev-credentials.txt`, which is gitignored and readable only by your user. Each account must set a new password at first sign-in. Delete that file once both passwords are changed.
+
+## Production-style run
+
+```bash
+npm run build
+npm start        # serves dist/ and the API from one process on port 3001
+```
+
+`npm start` marks cookies `Secure`, so it must be served over HTTPS (behind a reverse proxy).
+
+## Tests
+
+```bash
+npm test         # API tests against a throwaway database
+npm run lint
+```
+
+## Data
+
+SQLite database at `server/data/launchpad.db`: staff accounts (scrypt-hashed passwords), sessions, guests, check-ins, poll settings and votes. Live updates use Server-Sent Events (`/api/events`).

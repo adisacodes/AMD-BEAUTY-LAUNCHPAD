@@ -1,0 +1,435 @@
+// LaunchPad API: built-in node:http, node:sqlite and node:crypto only.
+import { createServer } from "node:http";
+import { randomBytes, randomInt } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import { extname, join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { db, transaction, getSettings, setSetting } from "./db.js";
+import {
+  SESSION_COOKIE, hashPassword, verifyPassword, generateTempPassword, passwordProblem,
+  createSession, userFromToken, destroySession, destroyUserSessions,
+  isRateLimited, recordFailure, clearFailures,
+} from "./auth.js";
+import { seed, CREDENTIALS_FILE } from "./seed.js";
+import { polls } from "../src/data/polls.js";
+
+const PORT = Number(process.env.PORT ?? 3001);
+const PROD = process.env.NODE_ENV === "production";
+const ATTENDEE_COOKIE = "amd_aid";
+const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "../dist");
+
+// ---------- helpers ----------
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+function cookie(name, value, { maxAge, sameSite = "Strict" } = {}) {
+  let c = `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=${sameSite}`;
+  if (maxAge !== undefined) c += `; Max-Age=${maxAge}`;
+  if (PROD) c += "; Secure";
+  return c;
+}
+
+function send(res, status, body, headers = {}) {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...headers,
+  });
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req) {
+  if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) {
+    throw new HttpError(415, "Expected JSON.");
+  }
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 50_000) throw new HttpError(413, "Request too large.");
+    chunks.push(chunk);
+  }
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error();
+    return body;
+  } catch {
+    throw new HttpError(400, "Invalid JSON.");
+  }
+}
+
+const str = (v, max = 120) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+const clientIp = (req) => req.socket.remoteAddress ?? "unknown";
+
+// ---------- live updates (Server-Sent Events) ----------
+// Events only name what changed; clients refetch through their own authorised endpoints.
+const streams = new Set();
+function broadcast(topic) {
+  for (const res of streams) res.write(`data: ${topic}\n\n`);
+}
+setInterval(() => { for (const res of streams) res.write(": ping\n\n"); }, 25_000).unref();
+
+// ---------- auth guards ----------
+function requireUser(ctx, ...roles) {
+  if (!ctx.user) throw new HttpError(401, "Please log in.");
+  if (!roles.includes(ctx.user.role)) throw new HttpError(403, "You do not have access to this.");
+  if (ctx.user.mustChange) throw new HttpError(403, "password_change_required");
+  return ctx.user;
+}
+
+// ---------- data mapping ----------
+const GUEST_SQL = `SELECT g.id, g.name, g.organization, g.ticket_type AS ticketType, g.code, c.checked_in_at AS checkedInAt
+  FROM guests g LEFT JOIN checkins c ON c.guest_id = g.id`;
+
+function generateCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  for (let attempt = 0; attempt < 20; attempt++) {
+    let code = "AMD-";
+    for (let i = 0; i < 6; i++) code += alphabet[randomInt(alphabet.length)];
+    if (!db.prepare("SELECT 1 FROM guests WHERE code = ?").get(code)) return code;
+  }
+  throw new HttpError(500, "Could not generate a unique code.");
+}
+
+function guestInput(body) {
+  const name = str(body.name);
+  if (!name) throw new HttpError(400, "Guest name is required.");
+  return { name, organization: str(body.organization), ticketType: str(body.ticketType, 40) };
+}
+
+function results() {
+  const rows = db.prepare("SELECT question_id AS q, option AS o, COUNT(*) AS n FROM votes GROUP BY question_id, option").all();
+  const votes = {};
+  for (const r of rows) (votes[r.q] ??= {})[r.o] = r.n;
+  const voters = db.prepare("SELECT COUNT(DISTINCT attendee_id) AS n FROM votes").get().n;
+  return { votes, voters };
+}
+
+function attendance() {
+  const total = db.prepare("SELECT COUNT(*) AS n FROM guests").get().n;
+  const checkedIn = db.prepare("SELECT COUNT(*) AS n FROM checkins").get().n;
+  return { total, checkedIn };
+}
+
+// ---------- routes ----------
+const routes = [];
+const route = (method, pattern, handler) => {
+  const keys = [];
+  const re = new RegExp(`^${pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), "(\\d+)"))}$`);
+  routes.push({ method, re, keys, handler });
+};
+
+// Auth
+route("GET", "/api/auth/me", (ctx) => ({ user: ctx.user }));
+
+route("POST", "/api/auth/login", async (ctx) => {
+  const body = await readJson(ctx.req);
+  const username = str(body.username, 64);
+  const password = typeof body.password === "string" ? body.password : "";
+  const portal = body.portal === "admin" ? "admin" : "usher";
+  const ip = clientIp(ctx.req);
+  if (isRateLimited(ip, username)) throw new HttpError(429, "Too many attempts. Try again in 15 minutes.");
+
+  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  const valid = user && verifyPassword(password, user.password_hash);
+  // Same message for every failure so usernames cannot be probed.
+  if (!valid || !user.active || user.role !== portal) {
+    recordFailure(ip, username);
+    throw new HttpError(401, "Invalid username or password.");
+  }
+  clearFailures(ip, username);
+  db.prepare("UPDATE users SET last_login_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").run(user.id);
+  const { token, maxAge } = createSession(user.id);
+  ctx.setCookie(cookie(SESSION_COOKIE, token, { maxAge }));
+  return { user: { id: user.id, username: user.username, role: user.role, mustChange: !!user.must_change } };
+});
+
+route("POST", "/api/auth/logout", (ctx) => {
+  destroySession(ctx.token);
+  ctx.setCookie(cookie(SESSION_COOKIE, "", { maxAge: 0 }));
+  return { ok: true };
+});
+
+route("POST", "/api/auth/change-password", async (ctx) => {
+  if (!ctx.user) throw new HttpError(401, "Please log in.");
+  const body = await readJson(ctx.req);
+  const row = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(ctx.user.id);
+  if (!verifyPassword(String(body.currentPassword ?? ""), row.password_hash)) {
+    throw new HttpError(400, "Current password is incorrect.");
+  }
+  const problem = passwordProblem(body.newPassword, ctx.user.username);
+  if (problem) throw new HttpError(400, problem);
+  if (body.newPassword === body.currentPassword) throw new HttpError(400, "Choose a different password.");
+  db.prepare("UPDATE users SET password_hash = ?, must_change = 0 WHERE id = ?").run(hashPassword(body.newPassword), ctx.user.id);
+  destroyUserSessions(ctx.user.id, ctx.token);
+  return { user: { ...ctx.user, mustChange: false } };
+});
+
+// Guests + check-in (usher and admin)
+route("GET", "/api/guests", (ctx) => {
+  requireUser(ctx, "usher", "admin");
+  return { guests: db.prepare(`${GUEST_SQL} ORDER BY g.name COLLATE NOCASE`).all(), ...attendance() };
+});
+
+route("POST", "/api/checkin", async (ctx) => {
+  const user = requireUser(ctx, "usher", "admin");
+  const body = await readJson(ctx.req);
+  const guest = body.code !== undefined
+    ? db.prepare(`${GUEST_SQL} WHERE g.code = ?`).get(str(body.code, 40).toUpperCase())
+    : db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(Number(body.guestId) || 0);
+  if (!guest) return { status: "not_found" };
+  const now = new Date().toISOString();
+  // The primary key on guest_id makes this atomic: a second device gets "already".
+  const { changes } = db
+    .prepare("INSERT OR IGNORE INTO checkins (guest_id, checked_in_at, checked_in_by) VALUES (?, ?, ?)")
+    .run(guest.id, now, user.id);
+  if (!changes) {
+    const time = db.prepare("SELECT checked_in_at AS t FROM checkins WHERE guest_id = ?").get(guest.id).t;
+    return { status: "already", guest, time };
+  }
+  broadcast("checkins");
+  return { status: "ok", guest: { ...guest, checkedInAt: now } };
+});
+
+// Admin: guests
+route("POST", "/api/admin/guests", async (ctx) => {
+  requireUser(ctx, "admin");
+  const g = guestInput(await readJson(ctx.req));
+  const { lastInsertRowid } = db
+    .prepare("INSERT INTO guests (name, organization, ticket_type, code) VALUES (?, ?, ?, ?)")
+    .run(g.name, g.organization, g.ticketType, generateCode());
+  broadcast("guests");
+  return { guest: db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(lastInsertRowid) };
+});
+
+route("PUT", "/api/admin/guests/:id", async (ctx) => {
+  requireUser(ctx, "admin");
+  const g = guestInput(await readJson(ctx.req));
+  const { changes } = db
+    .prepare("UPDATE guests SET name = ?, organization = ?, ticket_type = ? WHERE id = ?")
+    .run(g.name, g.organization, g.ticketType, ctx.params.id);
+  if (!changes) throw new HttpError(404, "Guest not found.");
+  broadcast("guests");
+  return { guest: db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(ctx.params.id) };
+});
+
+route("POST", "/api/admin/guests/:id/code", (ctx) => {
+  requireUser(ctx, "admin");
+  const { changes } = db.prepare("UPDATE guests SET code = ? WHERE id = ?").run(generateCode(), ctx.params.id);
+  if (!changes) throw new HttpError(404, "Guest not found.");
+  broadcast("guests");
+  return { guest: db.prepare(`${GUEST_SQL} WHERE g.id = ?`).get(ctx.params.id) };
+});
+
+route("DELETE", "/api/admin/guests/:id", (ctx) => {
+  requireUser(ctx, "admin");
+  const { changes } = db.prepare("DELETE FROM guests WHERE id = ?").run(ctx.params.id);
+  if (!changes) throw new HttpError(404, "Guest not found.");
+  broadcast("guests");
+  return { ok: true };
+});
+
+// Admin: ushers
+const USHER_SQL = `SELECT id, username, active, must_change AS mustChange, created_at AS createdAt, last_login_at AS lastLoginAt
+  FROM users WHERE role = 'usher'`;
+
+route("GET", "/api/admin/ushers", (ctx) => {
+  requireUser(ctx, "admin");
+  return { ushers: db.prepare(`${USHER_SQL} ORDER BY username`).all() };
+});
+
+route("POST", "/api/admin/ushers", async (ctx) => {
+  requireUser(ctx, "admin");
+  const body = await readJson(ctx.req);
+  const username = str(body.username, 32).toLowerCase();
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+    throw new HttpError(400, "Username: 3-32 characters, letters, numbers, dot, dash or underscore.");
+  }
+  if (db.prepare("SELECT 1 FROM users WHERE username = ?").get(username)) throw new HttpError(409, "That username is taken.");
+  const tempPassword = generateTempPassword();
+  db.prepare("INSERT INTO users (username, role, password_hash, must_change) VALUES (?, 'usher', ?, 1)")
+    .run(username, hashPassword(tempPassword));
+  // The temporary password is returned once, to the admin who created it, and never stored in plain text.
+  return { username, tempPassword };
+});
+
+function usherOr404(id) {
+  const u = db.prepare(`${USHER_SQL} AND id = ?`).get(id);
+  if (!u) throw new HttpError(404, "Usher not found.");
+  return u;
+}
+
+route("PATCH", "/api/admin/ushers/:id", async (ctx) => {
+  requireUser(ctx, "admin");
+  const body = await readJson(ctx.req);
+  usherOr404(ctx.params.id);
+  if (typeof body.active !== "boolean") throw new HttpError(400, "active must be true or false.");
+  db.prepare("UPDATE users SET active = ? WHERE id = ?").run(body.active ? 1 : 0, ctx.params.id);
+  if (!body.active) destroyUserSessions(ctx.params.id);
+  return { usher: usherOr404(ctx.params.id) };
+});
+
+route("POST", "/api/admin/ushers/:id/reset-password", (ctx) => {
+  requireUser(ctx, "admin");
+  const u = usherOr404(ctx.params.id);
+  const tempPassword = generateTempPassword();
+  db.prepare("UPDATE users SET password_hash = ?, must_change = 1 WHERE id = ?").run(hashPassword(tempPassword), u.id);
+  destroyUserSessions(u.id);
+  return { username: u.username, tempPassword };
+});
+
+// Admin: poll controls
+route("PUT", "/api/admin/settings", async (ctx) => {
+  requireUser(ctx, "admin");
+  const body = await readJson(ctx.req);
+  if (body.pollOpen !== undefined) {
+    if (typeof body.pollOpen !== "boolean") throw new HttpError(400, "pollOpen must be true or false.");
+    setSetting("poll_open", body.pollOpen);
+  }
+  if (body.resultsVisible !== undefined) {
+    if (typeof body.resultsVisible !== "boolean") throw new HttpError(400, "resultsVisible must be true or false.");
+    setSetting("results_visible", body.resultsVisible);
+  }
+  broadcast("poll");
+  return getSettings();
+});
+
+route("POST", "/api/admin/poll/reset", (ctx) => {
+  requireUser(ctx, "admin");
+  db.exec("DELETE FROM votes");
+  broadcast("poll");
+  return { ok: true };
+});
+
+route("GET", "/api/admin/overview", (ctx) => {
+  requireUser(ctx, "admin");
+  return { ...attendance(), ...results(), settings: getSettings() };
+});
+
+// Public: attendee poll. Attendees are anonymous; an HttpOnly cookie identifies the browser.
+route("GET", "/api/poll", (ctx) => {
+  const { pollOpen, resultsVisible } = getSettings();
+  const aid = ctx.attendeeId();
+  const answered = db.prepare("SELECT COUNT(*) AS n FROM votes WHERE attendee_id = ?").get(aid).n;
+  return { open: pollOpen, resultsVisible, submitted: answered >= polls.length };
+});
+
+route("POST", "/api/poll/vote", async (ctx) => {
+  const body = await readJson(ctx.req);
+  const answers = body.answers && typeof body.answers === "object" ? body.answers : {};
+  for (const p of polls) {
+    if (!p.options.some((o) => o.label === answers[p.id])) throw new HttpError(400, "Please answer every question.");
+  }
+  const aid = ctx.attendeeId();
+  transaction(() => {
+    if (!getSettings().pollOpen) throw new HttpError(409, "The poll is closed.");
+    if (db.prepare("SELECT 1 FROM votes WHERE attendee_id = ?").get(aid)) {
+      throw new HttpError(409, "You have already voted.");
+    }
+    const insert = db.prepare("INSERT INTO votes (attendee_id, question_id, option) VALUES (?, ?, ?)");
+    for (const p of polls) insert.run(aid, p.id, answers[p.id]);
+  });
+  broadcast("poll");
+  return { ok: true };
+});
+
+route("GET", "/api/poll/results", (ctx) => {
+  const isAdmin = ctx.user?.role === "admin" && !ctx.user.mustChange;
+  if (!getSettings().resultsVisible && !isAdmin) throw new HttpError(403, "Results are hidden.");
+  return results();
+});
+
+// ---------- static files (production build) ----------
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml", ".json": "application/json" };
+
+async function serveStatic(req, res, pathname) {
+  let file = resolve(join(DIST, decodeURIComponent(pathname)));
+  if (!file.startsWith(DIST)) file = join(DIST, "index.html");
+  try {
+    if (!(await stat(file)).isFile()) throw new Error();
+  } catch {
+    file = join(DIST, "index.html"); // SPA fallback for client-side routes.
+  }
+  try {
+    const data = await readFile(file);
+    res.writeHead(200, { "Content-Type": TYPES[extname(file)] ?? "application/octet-stream" });
+    res.end(data);
+  } catch {
+    res.writeHead(404).end("Not found. Run `npm run build` first.");
+  }
+}
+
+// ---------- server ----------
+export const server = createServer(async (req, res) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("X-Frame-Options", "DENY");
+
+  const url = new URL(req.url, "http://localhost");
+  if (!url.pathname.startsWith("/api/")) return serveStatic(req, res, url.pathname);
+
+  const cookies = parseCookies(req);
+  const setCookies = [];
+  const ctx = {
+    req,
+    token: cookies[SESSION_COOKIE],
+    user: userFromToken(cookies[SESSION_COOKIE]),
+    params: {},
+    setCookie: (c) => setCookies.push(c),
+    attendeeId() {
+      let aid = cookies[ATTENDEE_COOKIE];
+      if (!aid || !/^[A-Za-z0-9_-]{20,64}$/.test(aid)) {
+        aid = randomBytes(24).toString("base64url");
+        cookies[ATTENDEE_COOKIE] = aid;
+        setCookies.push(cookie(ATTENDEE_COOKIE, aid, { maxAge: 60 * 60 * 24 * 30, sameSite: "Lax" }));
+      }
+      return aid;
+    },
+  };
+
+  // Cross-site request protection for state-changing calls (on top of SameSite cookies).
+  // PUBLIC_ORIGIN can be set when a reverse proxy rewrites the Host header.
+  if (req.method !== "GET" && req.headers.origin) {
+    let originHost = "";
+    try { originHost = new URL(req.headers.origin).host; } catch { /* invalid Origin */ }
+    const allowed = originHost === req.headers.host || req.headers.origin === process.env.PUBLIC_ORIGIN;
+    if (!allowed) return send(res, 403, { error: "Cross-site request blocked." });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/events") {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive" });
+    res.write("retry: 3000\n\n");
+    streams.add(res);
+    req.on("close", () => streams.delete(res));
+    return;
+  }
+
+  for (const r of routes) {
+    const m = r.method === req.method && url.pathname.match(r.re);
+    if (!m) continue;
+    r.keys.forEach((k, i) => (ctx.params[k] = Number(m[i + 1])));
+    try {
+      const body = await r.handler(ctx);
+      return send(res, 200, body, setCookies.length ? { "Set-Cookie": setCookies } : {});
+    } catch (err) {
+      const status = err instanceof HttpError ? err.status : 500;
+      if (status === 500) console.error(err);
+      return send(res, status, { error: status === 500 ? "Something went wrong." : err.message },
+        setCookies.length ? { "Set-Cookie": setCookies } : {});
+    }
+  }
+  send(res, 404, { error: "Not found." });
+});
+
+if (seed()) console.log(`Created staff accounts. Temporary passwords are in ${CREDENTIALS_FILE}`);
+server.listen(PORT, () => console.log(`LaunchPad API listening on http://localhost:${PORT}`));
