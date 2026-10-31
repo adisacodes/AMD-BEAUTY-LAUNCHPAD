@@ -3,32 +3,65 @@ import { guests } from "./data/guests";
 import { polls } from "./data/polls";
 import { loadData, saveData } from "./utils/storage";
 import Header from "./components/Header";
+import AccessibilityBar from "./components/AccessibilityBar";
+import LandingPage from "./pages/LandingPage";
+import WaitingPage from "./pages/WaitingPage";
 import UsherPage from "./pages/UsherPage";
 import PollPage from "./pages/PollPage";
 import OrganizerPage from "./pages/OrganizerPage";
+import "./styles/attendee.css";
+
 
 const KEYS = {
   checkedIn: "amd_checkedIn",
   votes: "amd_votes",
   answered: "amd_answered",
+  pollOpen: "amd_pollOpen",
+  a11y: "amd_a11y",
 };
 
+// Staff reach their screens with #usher, #organizer (or #poll for testing).
+// Anyone without a hash is an attendee and sees the landing page first.
+function readStaffTab() {
+  const h = window.location.hash.replace("#", "");
+  return ["usher", "poll", "organizer"].includes(h) ? h : null;
+}
+
 export default function App() {
-  const [tab, setTab] = useState("usher");
+  const [staffTab, setStaffTab] = useState(readStaffTab);
+  const [started, setStarted] = useState(false); // attendee pressed "Get started"
   const [checkedIn, setCheckedIn] = useState(() => loadData(KEYS.checkedIn, {}));
   const [votes, setVotes] = useState(() => loadData(KEYS.votes, {}));
   const [answered, setAnswered] = useState(() => loadData(KEYS.answered, {}));
+  const [pollOpen, setPollOpen] = useState(() => loadData(KEYS.pollOpen, false));
+  const [a11y, setA11y] = useState(() => loadData(KEYS.a11y, { size: 0, contrast: false }));
+
+  // Follow the address bar hash.
+  useEffect(() => {
+    const onHash = () => setStaffTab(readStaffTab());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   // Save to localStorage whenever something changes.
   useEffect(() => { saveData(KEYS.checkedIn, checkedIn); }, [checkedIn]);
   useEffect(() => { saveData(KEYS.votes, votes); }, [votes]);
   useEffect(() => { saveData(KEYS.answered, answered); }, [answered]);
+  useEffect(() => { saveData(KEYS.pollOpen, pollOpen); }, [pollOpen]);
 
-  // Keep two open tabs in sync (handy for the demo: organizer in one tab).
+  // Apply the text size and contrast settings to the whole page.
+  useEffect(() => {
+    document.documentElement.dataset.size = String(a11y.size);
+    document.documentElement.dataset.contrast = a11y.contrast ? "high" : "normal";
+    saveData(KEYS.a11y, a11y);
+  }, [a11y]);
+
+  // Keep open tabs in sync (organizer in one tab, attendee in another).
   useEffect(() => {
     function onStorage(e) {
       if (e.key === KEYS.checkedIn) setCheckedIn(loadData(KEYS.checkedIn, {}));
       if (e.key === KEYS.votes) setVotes(loadData(KEYS.votes, {}));
+      if (e.key === KEYS.pollOpen) setPollOpen(loadData(KEYS.pollOpen, false));
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
@@ -61,22 +94,61 @@ export default function App() {
     setAnswered((prev) => ({ ...prev, [questionId]: option }));
   }
 
+  const pollPage = (
+    <PollPage polls={polls} answered={answered} onVote={vote} onReset={() => setAnswered({})} />
+  );
+
+  // ----- Staff view (usher / organizer) -----
+  if (staffTab) {
+    return (
+      <div className="app">
+        <Header tab={staffTab} onTabChange={(t) => (window.location.hash = t)} />
+        {staffTab === "usher" && (
+          <UsherPage
+            guests={guests}
+            checkedIn={checkedIn}
+            onCheckIn={checkIn}
+            onCheckInByCode={checkInByCode}
+          />
+        )}
+        {staffTab === "poll" && pollPage}
+        {staffTab === "organizer" && (
+          <OrganizerPage
+            guests={guests}
+            checkedIn={checkedIn}
+            polls={polls}
+            votes={votes}
+            pollOpen={pollOpen}
+            onTogglePoll={() => setPollOpen((open) => !open)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // ----- Attendee view -----
+  if (!started) {
+    return <LandingPage onStart={() => setStarted(true)} />;
+  }
+
+  // People who already finished keep seeing their thank-you, even if the poll closes.
+  const allDone = polls.every((p) => answered[p.id]);
+  const showPoll = pollOpen || allDone;
+
   return (
     <div className="app">
-      <Header tab={tab} onTabChange={setTab} />
-      {tab === "usher" && (
-        <UsherPage
-          guests={guests}
-          checkedIn={checkedIn}
-          onCheckIn={checkIn}
-          onCheckInByCode={checkInByCode}
-        />
-      )}
-      {tab === "poll" && (
-        <PollPage polls={polls} answered={answered} onVote={vote} onReset={() => setAnswered({})} />
-      )}
-      {tab === "organizer" && (
-        <OrganizerPage guests={guests} checkedIn={checkedIn} polls={polls} votes={votes} />
+      <div className="attendee-bar">AMD BEAUTY</div>
+      <AccessibilityBar
+        settings={a11y}
+        onChange={(patch) => setA11y((prev) => ({ ...prev, ...patch }))}
+      />
+      {showPoll ? (
+        <>
+          <h1 className="sr-only">AMD Beauty launch poll</h1>
+          {pollPage}
+        </>
+      ) : (
+        <WaitingPage />
       )}
     </div>
   );

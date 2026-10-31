@@ -9,7 +9,7 @@ export default function Header({ tab, onTabChange }) {
     <>
       <header className="header">
         <h1>AMD BEAUTY</h1>
-        <p>Product launch · powered by LaunchPad</p>
+        <p>Launch night: check-in and live poll</p>
       </header>
       <nav className="tabs">
         {TABS.map((t) => (

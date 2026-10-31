@@ -1,16 +1,28 @@
-export default function OrganizerPage({ guests, checkedIn, polls, votes }) {
+export default function OrganizerPage({ guests, checkedIn, polls, votes, pollOpen, onTogglePoll }) {
   const total = guests.length;
   const count = guests.filter((g) => checkedIn[g.id]).length;
   const percent = total ? Math.round((count / total) * 100) : 0;
 
   return (
     <div className="page">
+      <div className="stat poll-control">
+        <div>
+          <div className="progress">Attendee poll</div>
+          <strong role="status">
+            {pollOpen ? "Open: guests can vote" : "Closed: guests see the waiting screen"}
+          </strong>
+        </div>
+        <button className="btn" onClick={onTogglePoll}>
+          {pollOpen ? "Close poll" : "Open poll"}
+        </button>
+      </div>
+
       <div className="stat">
         <div className="progress">Checked in</div>
         <div className="stat-number">
           {count} / {total}
         </div>
-        <div className="bar-track">
+        <div className="bar-track" aria-hidden="true">
           <div className="bar-fill" style={{ width: `${percent}%` }} />
         </div>
       </div>
@@ -32,7 +44,7 @@ export default function OrganizerPage({ guests, checkedIn, polls, votes }) {
                     <span>{o}</span>
                     <span>{n} ({pct}%)</span>
                   </div>
-                  <div className="bar-track">
+                  <div className="bar-track" aria-hidden="true">
                     <div className="bar-fill" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
